@@ -1,181 +1,327 @@
-<!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KiotViet POS</title>
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc } from 'firebase/firestore';
+import { Download, Send, Plus, Trash2, Cloud, CloudOff, RefreshCw, User, Calendar } from 'lucide-react';
 
-<!-- LIB -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+// Cấu hình Firebase
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'pos-online-app';
 
-<style>
-:root{--green:#06a36b}
-body{margin:0;font-family:system-ui;background:#f4f6f8}
-.app{max-width:420px;margin:auto;min-height:100vh;padding-bottom:110px}
-header{background:var(--green);color:#fff;padding:12px;text-align:center;font-weight:700;position:sticky;top:0}
-.card{background:#fff;margin:12px;border-radius:12px;padding:12px}
-.btn{background:var(--green);color:#fff;border:none;width:100%;padding:14px;border-radius:12px;font-size:16px;font-weight:700}
-.list{display:flex;flex-direction:column;gap:8px}
-.item{display:flex;justify-content:space-between;padding:10px;border:1px solid #eee;border-radius:10px}
-.fixed{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);width:100%;max-width:420px;padding:0 12px}
-.modal{position:fixed;inset:0;background:#fff;z-index:100;display:none;flex-direction:column}
-.modal header{background:var(--green);color:#fff;padding:12px;display:flex;justify-content:space-between}
-.search{padding:12px}
-.search input{width:100%;padding:10px;border-radius:10px;border:1px solid #ddd}
-.product{padding:12px;border-bottom:1px solid #eee}
-.product b{display:block}
-#scanner{height:220px}
-</style>
-</head>
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [form, setForm] = useState({ name: '', qty: 1, price: '', note: '' });
+  const [customer, setCustomer] = useState({ name: 'Khách lẻ', note: '' });
+  const [isExporting, setIsExporting] = useState(false);
 
-<body>
-<div class="app">
+  // 1. Xác thực người dùng (Auth)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      if (u) setUser(u);
+    });
+    return () => unsubscribe();
+  }, []);
 
-<header>TẠO ĐƠN HÀNG</header>
+  // 2. Lắng nghe dữ liệu Online từ Firestore
+  useEffect(() => {
+    if (!user) return;
 
-<div class="card">
-<b>Sản phẩm</b>
-<div id="orderList" class="list"></div>
-</div>
+    const itemsCol = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+    const unsubscribe = onSnapshot(
+      itemsCol,
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setItems(data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Firestore error:", err);
+        setLoading(false);
+      }
+    );
 
-<div class="card">
-<b>Tổng tiền: <span id="total">0 ₫</span></b>
-</div>
+    return () => unsubscribe();
+  }, [user]);
 
-<div class="fixed">
-<button class="btn" onclick="openCatalog()">➕ Thêm sản phẩm</button>
-<div style="height:8px"></div>
-<button class="btn" onclick="exportBill()">🧾 Xuất hóa đơn (Ảnh)</button>
-</div>
+  // 3. Hàm thêm sản phẩm
+  const addItem = async () => {
+    if (!form.name || !form.price || !user) return;
+    try {
+      const itemsCol = collection(db, 'artifacts', appId, 'public', 'data', 'orders');
+      await addDoc(itemsCol, {
+        ...form,
+        qty: Number(form.qty),
+        price: Number(form.price),
+        createdAt: Date.now()
+      });
+      setForm({ name: '', qty: 1, price: '', note: '' });
+    } catch (err) {
+      console.error("Add error:", err);
+    }
+  };
 
-</div>
+  // 4. Hàm xóa sản phẩm
+  const removeItem = async (id) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'orders', id));
+    } catch (err) {
+      console.error("Delete error:", err);
+    }
+  };
 
-<!-- MODAL CATALOG -->
-<div class="modal" id="catalog">
-<header>
-  <span>Chọn sản phẩm</span>
-  <button onclick="closeCatalog()">✕</button>
-</header>
+  // 5. Hàm xuất hóa đơn (Sử dụng script loading cho html2canvas)
+  const exportInvoice = async (isZalo = false) => {
+    if (items.length === 0) return;
+    setIsExporting(true);
+    
+    try {
+      // Tải html2canvas từ CDN nếu chưa có
+      if (!window.html2canvas) {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+      }
 
-<div class="search">
-<input placeholder="Tìm tên / SKU" oninput="searchProduct(this.value)">
-</div>
+      const element = document.getElementById('invoice-capture');
+      // Đảm bảo element hiển thị tạm thời để chụp
+      element.parentElement.style.left = "0px";
+      
+      const canvas = await window.html2canvas(element, { 
+        scale: 2, 
+        useCORS: true,
+        logging: false,
+        backgroundColor: "#ffffff"
+      });
+      
+      // Ẩn lại sau khi chụp
+      element.parentElement.style.left = "-9999px";
 
-<div id="scanner"></div>
+      const dataUrl = canvas.toDataURL("image/png");
+      
+      const link = document.createElement('a');
+      link.download = `DonHang_${customer.name}_${new Date().getTime()}.png`;
+      link.href = dataUrl;
+      link.click();
 
-<div id="catalogList" style="flex:1;overflow:auto"></div>
-</div>
+      if (isZalo) {
+        // Thông báo cho người dùng
+        const confirmZalo = window.confirm("Ảnh đơn hàng đã được tải về máy. Mở Zalo để gửi cho khách ngay?");
+        if (confirmZalo) {
+          window.location.href = "zalo://main";
+          setTimeout(() => window.open("https://chat.zalo.me/", "_blank"), 1500);
+        }
+      }
+    } catch (err) {
+      console.error("Export error:", err);
+      alert("Có lỗi khi xuất ảnh. Vui lòng thử lại.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
-<script>
-/* ===== DATA ===== */
-const products=[
- {id:1,name:"Thiên Môn Bổ Phế",price:85000,sku:"TM01"},
- {id:2,name:"Calci Tảo Biển",price:120000,sku:"CTB02"},
- {id:3,name:"Siro Ho Bách Bộ",price:65000,sku:"SH03"}
-];
-let order=[];
+  const totalAmount = items.reduce((sum, item) => sum + (item.qty * item.price), 0);
 
-/* ===== OPEN / CLOSE ===== */
-function openCatalog(){
- document.getElementById('catalog').style.display='flex';
- renderCatalog(products);
- startScanner();
+  return (
+    <div className="min-h-screen bg-gray-100 flex justify-center pb-32">
+      <div className="w-full max-w-md bg-white shadow-2xl flex flex-col min-h-screen relative">
+        
+        {/* Header Section */}
+        <div className="bg-gradient-to-r from-blue-700 to-blue-600 p-5 text-white shadow-lg">
+          <div className="flex justify-between items-center mb-2">
+            <h1 className="font-black uppercase tracking-tighter text-xl">POS Online</h1>
+            <RefreshCw 
+              size={18} 
+              className={`cursor-pointer ${loading ? 'animate-spin' : ''}`} 
+              onClick={() => window.location.reload()} 
+            />
+          </div>
+          <div className="flex items-center gap-2 text-[10px] bg-blue-800/40 p-1.5 rounded-lg w-fit">
+            {user ? (
+              <><Cloud size={12} className="text-green-400" /> <span className="opacity-90 font-mono">ĐÃ KẾT NỐI ĐÁM MÂY</span></>
+            ) : (
+              <><CloudOff size={12} className="text-red-400" /> <span className="opacity-90">ĐANG KẾT NỐI...</span></>
+            )}
+          </div>
+        </div>
+
+        {/* Khách hàng Info */}
+        <div className="p-4 border-b border-gray-100 grid grid-cols-2 gap-3 bg-white">
+          <div className="col-span-1">
+            <label className="text-[10px] font-bold text-gray-400 uppercase flex items-center gap-1 mb-1">
+              <User size={10} /> Khách hàng
+            </label>
+            <input 
+              className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none" 
+              value={customer.name}
+              onChange={(e) => setCustomer({...customer, name: e.target.value})}
+            />
+          </div>
+          <div className="col-span-1">
+            <label className="text-[10px] font-bold text-gray-400 uppercase flex items-center gap-1 mb-1">
+              <Calendar size={10} /> Ngày lập
+            </label>
+            <input type="date" className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-[11px]" defaultValue={new Date().toISOString().split('T')[0]} />
+          </div>
+        </div>
+
+        {/* Thêm hàng Section */}
+        <div className="p-4 bg-blue-50/50 space-y-3">
+          <input 
+            placeholder="Tên mặt hàng/dịch vụ" 
+            className="w-full p-3 rounded-xl border border-blue-100 shadow-sm text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            value={form.name}
+            onChange={(e) => setForm({...form, name: e.target.value})}
+          />
+          <div className="flex gap-2">
+            <input 
+              type="number" placeholder="SL" 
+              className="w-1/4 p-3 rounded-xl border border-blue-100 shadow-sm text-sm text-center font-bold"
+              value={form.qty}
+              onChange={(e) => setForm({...form, qty: e.target.value})}
+            />
+            <input 
+              type="number" placeholder="Đơn giá (VNĐ)" 
+              className="w-3/4 p-3 rounded-xl border border-blue-100 shadow-sm text-sm font-bold text-blue-700 outline-none focus:ring-2 focus:ring-blue-500"
+              value={form.price}
+              onChange={(e) => setForm({...form, price: e.target.value})}
+            />
+          </div>
+          <button 
+            onClick={addItem}
+            disabled={!user || !form.name || !form.price}
+            className={`w-full ${user && form.name && form.price ? 'bg-blue-600 shadow-blue-200' : 'bg-gray-400'} text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 shadow-lg active:scale-95 transition-all uppercase text-sm`}
+          >
+            <Plus size={20} /> Thêm vào đơn
+          </button>
+        </div>
+
+        {/* Danh sách List */}
+        <div className="p-4 flex-1 overflow-y-auto">
+          {items.length === 0 ? (
+            <div className="py-20 text-center flex flex-col items-center opacity-20">
+              <Plus size={48} className="mb-2" />
+              <p className="text-sm italic font-medium">Chưa có dữ liệu</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {items.map((item) => (
+                <div key={item.id} className="bg-white border border-gray-100 p-4 rounded-2xl flex justify-between items-center shadow-sm hover:border-blue-200 transition-colors">
+                  <div className="flex-1">
+                    <h4 className="font-bold text-gray-800 text-sm">{item.name}</h4>
+                    <p className="text-[10px] text-gray-500 mt-0.5">{item.qty} x {new Intl.NumberFormat('vi-VN').format(item.price)}đ</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="font-bold text-blue-700 text-sm">{new Intl.NumberFormat('vi-VN').format(item.qty * item.price)}đ</span>
+                    <button onClick={() => removeItem(item.id)} className="text-red-400 p-2 hover:bg-red-50 rounded-xl">
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Bar */}
+        <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t p-4 shadow-[0_-15px_30px_rgba(0,0,0,0.08)] z-50">
+          <div className="flex justify-between items-center mb-4 px-2">
+            <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Tổng tiền</span>
+            <span className="text-2xl font-black text-blue-700">{new Intl.NumberFormat('vi-VN').format(totalAmount)}đ</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={() => exportInvoice(false)}
+              disabled={isExporting}
+              className="flex flex-col items-center justify-center bg-gray-50 py-3 rounded-2xl text-[10px] font-bold uppercase text-gray-600 border border-gray-200 active:bg-gray-100 disabled:opacity-50"
+            >
+              <Download size={20} className="mb-1 text-gray-500" /> {isExporting ? 'Đang xử lý...' : 'Lưu ảnh'}
+            </button>
+            <button 
+              onClick={() => exportInvoice(true)}
+              disabled={isExporting}
+              className="flex flex-col items-center justify-center bg-[#0068ff] py-3 rounded-2xl text-[10px] font-bold uppercase text-white shadow-xl active:opacity-90 disabled:opacity-50"
+            >
+              <Send size={20} className="mb-1" /> Gửi Zalo
+            </button>
+          </div>
+        </div>
+
+        {/* KHU VỰC CHỤP ẢNH HÓA ĐƠN (ẨN) */}
+        <div className="absolute left-[-9999px] top-0 overflow-hidden" style={{ width: '500px' }}>
+          <div id="invoice-capture" className="bg-white p-10 text-black font-sans">
+            <div className="text-center mb-10">
+              <h2 className="text-4xl font-black uppercase tracking-[0.2em] border-b-8 border-black inline-block pb-2">ĐƠN HÀNG</h2>
+              <p className="mt-6 text-sm font-bold uppercase opacity-50 tracking-widest">Hóa đơn điện tử online</p>
+            </div>
+            
+            <div className="mb-10 text-sm grid grid-cols-2 gap-8 border-y-2 border-black/5 py-6">
+              <div>
+                <p className="text-[10px] font-black opacity-40 uppercase mb-1">Khách hàng</p>
+                <p className="font-black text-lg">{customer.name.toUpperCase()}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-black opacity-40 uppercase mb-1">Ngày lập</p>
+                <p className="font-black text-lg">{new Date().toLocaleDateString('vi-VN')}</p>
+              </div>
+            </div>
+
+            <table className="w-full text-sm">
+              <thead className="border-b-4 border-black font-black uppercase text-[10px] tracking-widest">
+                <tr>
+                  <td className="py-4">Mặt hàng</td>
+                  <td className="py-4 text-center">SL</td>
+                  <td className="py-4 text-right">Đơn giá</td>
+                  <td className="py-4 text-right">Thành tiền</td>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {items.map(item => (
+                  <tr key={item.id}>
+                    <td className="py-4 font-bold text-base">{item.name}</td>
+                    <td className="py-4 text-center font-medium">{item.qty}</td>
+                    <td className="py-4 text-right">{new Intl.NumberFormat('vi-VN').format(item.price)}</td>
+                    <td className="py-4 text-right font-black text-base">{new Intl.NumberFormat('vi-VN').format(item.qty * item.price)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="border-t-4 border-black">
+                <tr>
+                  <td colSpan="3" className="py-8 text-right font-black uppercase text-xs tracking-[0.2em]">Tổng thanh toán:</td>
+                  <td className="py-8 text-right text-3xl font-black">{new Intl.NumberFormat('vi-VN').format(totalAmount)}đ</td>
+                </tr>
+              </tfoot>
+            </table>
+            
+            <div className="mt-12 pt-8 border-t border-dashed border-gray-300 text-center">
+              <p className="text-sm font-black uppercase tracking-widest mb-2">Cảm ơn quý khách!</p>
+              <p className="text-[10px] text-gray-400 italic">Dữ liệu được lưu trữ trực tuyến an toàn</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
 }
-function closeCatalog(){
- document.getElementById('catalog').style.display='none';
- stopScanner();
-}
-
-/* ===== SEARCH ===== */
-function searchProduct(k){
- k=k.toLowerCase();
- renderCatalog(products.filter(p=>p.name.toLowerCase().includes(k)||p.sku.toLowerCase().includes(k)));
-}
-
-/* ===== RENDER ===== */
-function renderCatalog(list){
- const el=document.getElementById('catalogList');
- el.innerHTML='';
- list.forEach(p=>{
-  const d=document.createElement('div');
-  d.className='product';
-  d.innerHTML=`<b>${p.name}</b>SKU: ${p.sku}<br>${format(p.price)}`;
-  d.onclick=()=>addProduct(p);
-  el.appendChild(d);
- });
-}
-
-/* ===== ORDER ===== */
-function addProduct(p){
- const qty=+prompt("Số lượng",1);
- if(!qty) return;
- const found=order.find(i=>i.id===p.id);
- if(found) found.qty+=qty;
- else order.push({...p,qty});
- closeCatalog();
- renderOrder();
-}
-
-function renderOrder(){
- const el=document.getElementById('orderList');
- el.innerHTML='';
- let sum=0;
- order.forEach(p=>{
-  sum+=p.qty*p.price;
-  el.innerHTML+=`<div class="item"><div>${p.name} x ${p.qty}</div><b>${format(p.qty*p.price)}</b></div>`;
- });
- document.getElementById('total').innerText=format(sum);
-}
-
-/* ===== BILL IMAGE ===== */
-function exportBill(){
- const bill=document.createElement('div');
- bill.style.width='300px';
- bill.style.background='#fff';
- bill.style.padding='16px';
- bill.innerHTML='<h3 style="text-align:center">HÓA ĐƠN</h3>';
- let sum=0;
- order.forEach(p=>{
-  sum+=p.qty*p.price;
-  bill.innerHTML+=`${p.name} x ${p.qty} = ${format(p.qty*p.price)}<br>`;
- });
- bill.innerHTML+=`<hr><b>Tổng: ${format(sum)}</b>`;
- document.body.appendChild(bill);
-
- html2canvas(bill).then(c=>{
-  const a=document.createElement('a');
-  a.href=c.toDataURL();
-  a.download='hoa-don.png';
-  a.click();
-  bill.remove();
- });
-}
-
-/* ===== BARCODE ===== */
-function startScanner(){
- Quagga.init({
-  inputStream:{name:"Live",type:"LiveStream",target:document.querySelector('#scanner')},
-  decoder:{readers:["code_128_reader","ean_reader"]}
- },err=>{
-  if(!err) Quagga.start();
- });
- Quagga.onDetected(data=>{
-  const code=data.codeResult.code;
-  const found=products.find(p=>p.sku===code);
-  if(found){
-    addProduct(found);
-    Quagga.stop();
-  }
- });
-}
-function stopScanner(){
- try{Quagga.stop()}catch(e){}
-}
-
-/* ===== UTIL ===== */
-function format(n){return n.toLocaleString('vi-VN')+' ₫'}
-</script>
-
-</body>
-</html>
