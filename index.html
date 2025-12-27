@@ -67,23 +67,25 @@
 
             const showNotif = (msg) => { setNotif(msg); setTimeout(() => setNotif(null), 3000); };
 
+            // Cải thiện hàm fetchData để hoạt động tốt trên các domain khác nhau (như GitHub Pages)
             const fetchData = async () => {
                 if (!sheetUrl) return;
                 setLoading(true);
                 try {
-                    const res = await fetch(`${sheetUrl}?action=getData`);
+                    // Thêm tham số thời gian để tránh cache trình duyệt
+                    const res = await fetch(`${sheetUrl}?action=getData&_t=${Date.now()}`);
                     const data = await res.json();
                     setCloudData(data);
                     showNotif("Đã đồng bộ dữ liệu Cloud");
                 } catch (e) {
-                    showNotif("Lỗi kết nối Google Sheets");
+                    console.error(e);
+                    showNotif("Lỗi kết nối: Kiểm tra link Google Script và quyền truy cập 'Anyone'");
                 }
                 setLoading(false);
             };
 
             useEffect(() => { if (sheetUrl) fetchData(); }, []);
 
-            // Helper: Tự động trích xuất % giảm giá từ text ghi chú
             const calculateDiscountedPrice = (price, note) => {
                 const match = note.match(/(\d+)%/);
                 if (match) {
@@ -125,16 +127,21 @@
                 };
 
                 try {
+                    // Trên GitHub Pages, POST tới Google Script thường gặp lỗi CORS
+                    // Ta chuyển sang dùng fetch với mode 'no-cors' hoặc dùng GET nếu Script hỗ trợ
                     await fetch(sheetUrl, {
                         method: 'POST',
-                        mode: 'no-cors',
+                        mode: 'no-cors', // Quan trọng để bỏ qua lỗi CORS khi chỉ cần gửi dữ liệu đi
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(orderData)
                     });
-                    showNotif("✅ Lưu đơn thành công!");
+                    
+                    showNotif("✅ Đã gửi lệnh lưu đơn!");
                     setCart([]);
                     setCustomer('Khách lẻ');
                     setOrderNote('');
-                    fetchData();
+                    // Đợi 1 chút rồi tải lại dữ liệu
+                    setTimeout(fetchData, 1500);
                 } catch (e) {
                     showNotif("Lỗi lưu đơn");
                 }
@@ -143,18 +150,19 @@
 
             // Filtering
             const filteredProducts = useMemo(() => {
-                return cloudData.products.filter(p => p.name.toLowerCase().includes(searchProd.toLowerCase()));
+                return (cloudData.products || []).filter(p => p.name.toLowerCase().includes(searchProd.toLowerCase()));
             }, [cloudData.products, searchProd]);
 
             const filteredCustomers = useMemo(() => {
-                return cloudData.customers.filter(c => c.name.toLowerCase().includes(searchCust.toLowerCase()));
+                return (cloudData.customers || []).filter(c => c.name.toLowerCase().includes(searchCust.toLowerCase()));
             }, [cloudData.customers, searchCust]);
 
             const reportStats = useMemo(() => {
                 const today = new Date().toDateString();
-                const todaySales = cloudData.sales.filter(s => new Date(s.date).toDateString() === today);
+                const history = cloudData.sales || [];
+                const todaySales = history.filter(s => new Date(s.date).toDateString() === today);
                 const todayTotal = todaySales.reduce((sum, s) => sum + Number(s.total), 0);
-                return { todayTotal, count: todaySales.length, history: cloudData.sales };
+                return { todayTotal, count: todaySales.length, history };
             }, [cloudData.sales]);
 
             return (
@@ -321,13 +329,13 @@
                                     <div className="ios-card divide-y divide-slate-50 overflow-hidden">
                                         {reportStats.history.slice().reverse().slice(0, 10).map((sale, i) => (
                                             <div key={i} className="p-4 flex justify-between items-center">
-                                                <div>
-                                                    <div className="text-[11px] font-black text-slate-700 uppercase leading-none mb-1">{sale.customer}</div>
+                                                <div className="min-w-0 pr-4">
+                                                    <div className="text-[11px] font-black text-slate-700 uppercase leading-none mb-1 truncate">{sale.customer}</div>
                                                     <div className="text-[9px] text-slate-400 font-bold">
                                                         {new Date(sale.date).toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'})} • {new Date(sale.date).toLocaleDateString('vi-VN')}
                                                     </div>
                                                 </div>
-                                                <div className="text-sm font-black text-slate-800">+{Number(sale.total).toLocaleString()}đ</div>
+                                                <div className="text-sm font-black text-slate-800 shrink-0">+{Number(sale.total).toLocaleString()}đ</div>
                                             </div>
                                         ))}
                                     </div>
@@ -337,12 +345,16 @@
 
                         {view === 'settings' && (
                             <div className="animate-up ios-card p-6 space-y-6">
-                                <div>
-                                    <h3 className="text-xl font-black text-slate-800 mb-1">Cấu hình Cloud</h3>
-                                    <p className="text-xs text-slate-400 font-medium">Nhập Web App URL từ Google Apps Script của bạn.</p>
+                                <div className="space-y-1">
+                                    <h3 className="text-xl font-black text-slate-800">Cấu hình Cloud</h3>
+                                    <p className="text-[11px] text-slate-400 font-bold leading-relaxed">
+                                        1. Deploy Apps Script ở dạng <span className="text-blue-600">Web App</span>.<br/>
+                                        2. Quyền truy cập: <span className="text-blue-600">Anyone</span> (Rất quan trọng).<br/>
+                                        3. Dán URL nhận được vào ô bên dưới.
+                                    </p>
                                 </div>
                                 <textarea 
-                                    className="w-full h-40 p-5 bg-slate-50 rounded-[1.5rem] text-[10px] border-2 border-slate-100 outline-none focus:border-blue-500 font-mono text-blue-600"
+                                    className="w-full h-32 p-5 bg-slate-50 rounded-[1.5rem] text-[10px] border-2 border-slate-100 outline-none focus:border-blue-500 font-mono text-blue-600"
                                     value={sheetUrl}
                                     onChange={e => {setSheetUrl(e.target.value); localStorage.setItem('NL_POS_URL', e.target.value)}}
                                     placeholder="https://script.google.com/macros/s/.../exec"
@@ -379,7 +391,7 @@
                                 disabled={loading}
                                 className="w-full bg-slate-900 text-white p-5 rounded-[2rem] shadow-2xl flex justify-between items-center btn-press overflow-hidden relative"
                             >
-                                {loading && <div className="absolute inset-0 bg-black/20 flex items-center justify-center z-10"><SyncIcon /></div>}
+                                {loading && <div className="absolute inset-0 bg-black/20 flex items-center justify-center z-10"><SyncIcon className="animate-spin" /></div>}
                                 <div className="text-left">
                                     <span className="text-[9px] font-bold text-white/40 uppercase block tracking-widest">Tổng thanh toán</span>
                                     <span className="text-2xl font-black italic tracking-tight">{totalAmount.toLocaleString()}<small className="text-xs ml-1 not-italic opacity-40">đ</small></span>
